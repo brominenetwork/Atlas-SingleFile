@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atlas</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#ccc;font-family:monospace;height:100vh;overflow:hidden}
+
+#home{height:100vh;display:flex;align-items:center;justify-content:center}
+.wrap{width:420px;padding:0 1rem}
+h1{font-size:1.1rem;font-weight:normal;color:#fff;margin-bottom:1.25rem;letter-spacing:.02em}
+h1 span{color:#555;font-size:.85rem;margin-left:.4rem}
+form{display:flex;gap:.5rem}
+input[type=text]{flex:1;background:#1a1a1a;border:1px solid #2a2a2a;color:#ddd;font-family:monospace;font-size:.875rem;padding:.5rem .75rem;outline:none}
+input[type=text]:focus{border-color:#444}
+input[type=text]::placeholder{color:#444}
+button{background:#222;border:1px solid #2a2a2a;color:#aaa;font-family:monospace;font-size:.875rem;padding:.5rem 1rem;cursor:pointer}
+button:hover{background:#2a2a2a;color:#fff}
+.links{margin-top:1rem;display:flex;gap:1rem;font-size:.75rem}
+.links a{color:#444;text-decoration:none}
+.links a:hover{color:#888}
+
+#browser{display:none;flex-direction:column;height:100vh}
+#toolbar{display:flex;align-items:center;gap:.4rem;padding:.4rem .6rem;background:#161616;border-bottom:1px solid #222;flex-shrink:0}
+#toolbar button{padding:.3rem .6rem;font-size:.75rem}
+#url-bar{flex:1;background:#1a1a1a;border:1px solid #2a2a2a;color:#ddd;font-family:monospace;font-size:.8rem;padding:.3rem .6rem;outline:none}
+#url-bar:focus{border-color:#444}
+#frame{flex:1;border:none;background:#fff}
+#loading{position:absolute;top:0;left:0;right:0;height:2px;background:#444;display:none}
+#loading.active{display:block;animation:load 1.2s ease-in-out infinite}
+@keyframes load{0%{transform:scaleX(0);transform-origin:left}50%{transform:scaleX(.6);transform-origin:left}51%{transform:scaleX(.6);transform-origin:right}100%{transform:scaleX(0);transform-origin:right}}
+
+.error-box{background:#111;color:#ccc;font-family:monospace;height:100%;display:flex;align-items:center;justify-content:center}
+.error-box .inner{width:480px;padding:0 1rem}
+.error-box .code{font-size:3rem;font-weight:700;color:#333;margin-bottom:.5rem}
+.error-box .title{font-size:1rem;color:#fff;margin-bottom:.75rem}
+.error-box .msg{font-size:.8rem;color:#555;line-height:1.6;word-break:break-all}
+</style>
+</head>
+<body>
+
+<div id="home">
+  <div class="wrap">
+    <h1>atlas <span>by bromine network</span></h1>
+    <form id="search-form">
+      <input id="search-input" type="text" placeholder="search or enter a url." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    </form>
+    <div class="links">
+      <a href="https://github.com/brominenetwork/Atlas" target="_blank">github</a>
+      <a href="https://discord.gg/unblockings" target="_blank">discord</a>
+      <a href="https://t.me/@qatual" target="_blank">telegram</a>
+    </div>
+  </div>
+</div>
+
+<div id="browser">
+  <div id="loading"></div>
+  <div id="toolbar">
+    <button id="btn-back">&#8592;</button>
+    <button id="btn-home">home</button>
+    <input id="url-bar" type="text" spellcheck="false">
+    <button id="btn-go">go</button>
+  </div>
+  <iframe id="frame" sandbox="allow-scripts allow-forms allow-same-origin allow-popups"></iframe>
+</div>
+
+<script>
+(function () {
+
+const PROXY = "https://corsproxy.io/?";
+
+function proxied(url) {
+  return PROXY + encodeURIComponent(url);
+}
+
+function resolve(href, base) {
+  if (!href) return null;
+  const h = href.trim();
+  if (/^(javascript:|data:|blob:|#|mailto:|tel:|about:)/.test(h)) return null;
+  try { return new URL(h, base).href; } catch { return null; }
+}
+
+function rewriteCss(css, base) {
+  if (!css) return css;
+  return css
+    .replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, function(_, q, u) {
+      var r = resolve(u.trim(), base);
+      return r ? "url(" + q + proxied(r) + q + ")" : "url(" + q + u + q + ")";
+    })
+    .replace(/@import\s+(['"])([^'"]+)\1/gi, function(_, q, u) {
+      var r = resolve(u, base);
+      return r ? "@import " + q + proxied(r) + q : "@import " + q + u + q;
+    })
+    .replace(/@import\s+url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, function(_, q, u) {
+      var r = resolve(u.trim(), base);
+      return r ? "@import url(" + q + proxied(r) + q + ")" : "@import url(" + q + u + q + ")";
+    });
+}
+
+const NAV_SCRIPT = [
+  "(function(){",
+  "  document.addEventListener('click', function(e){",
+  "    var a = e.target && e.target.closest && e.target.closest('[data-atlas-href]');",
+  "    if(!a) return;",
+  "    e.preventDefault();",
+  "    var u = a.getAttribute('data-atlas-href');",
+  "    if(u) parent.postMessage({type:'atlas-nav',url:u},'*');",
+  "  }, true);",
+  "  document.addEventListener('submit', function(e){",
+  "    var form = e.target;",
+  "    if(!form) return;",
+  "    var action = form.getAttribute('data-atlas-action') || form.action;",
+  "    if(!action || action.startsWith(location.origin)) return;",
+  "    e.preventDefault();",
+  "    var params = new URLSearchParams(new FormData(form)).toString();",
+  "    var method = (form.method||'get').toLowerCase();",
+  "    if(method==='get'){",
+  "      parent.postMessage({type:'atlas-nav',url:action+(params?'?'+params:'')},'*');",
+  "    } else {",
+  "      parent.postMessage({type:'atlas-nav',url:action,method:'POST',body:params},'*');",
+  "    }",
+  "  }, true);",
+  "})();"
+].join("\n");
+
+function rewriteDoc(doc, base) {
+  doc.querySelectorAll('meta[http-equiv="Content-Security-Policy"], meta[http-equiv="content-security-policy"]')
+    .forEach(function(el){ el.remove(); });
+
+  doc.querySelectorAll('[integrity]').forEach(function(el){ el.removeAttribute('integrity'); });
+
+  doc.querySelectorAll('base[href]').forEach(function(el){
+    try { base = new URL(el.getAttribute('href'), base).href; } catch {}
+    el.remove();
+  });
+
+  var resMap = {IMG:'src',SCRIPT:'src',AUDIO:'src',VIDEO:'src',SOURCE:'src',TRACK:'src',EMBED:'src',IFRAME:'src',INPUT:'src',LINK:'href'};
+  Object.keys(resMap).forEach(function(tag){
+    var attr = resMap[tag];
+    doc.querySelectorAll(tag + '[' + attr + ']').forEach(function(el){
+      var val = el.getAttribute(attr);
+      var r = resolve(val, base);
+      if(r) el.setAttribute(attr, proxied(r));
+    });
+  });
+
+  doc.querySelectorAll('object[data]').forEach(function(el){
+    var r = resolve(el.getAttribute('data'), base);
+    if(r) el.setAttribute('data', proxied(r));
+  });
+
+  doc.querySelectorAll('[srcset]').forEach(function(el){
+    el.setAttribute('srcset', el.getAttribute('srcset').split(',').map(function(part){
+      var m = part.trim().match(/^(\S+)(\s.*)?$/);
+      if(!m) return part;
+      var r = resolve(m[1], base);
+      return r ? proxied(r) + (m[2]||'') : part;
+    }).join(', '));
+  });
+
+  doc.querySelectorAll('[style]').forEach(function(el){
+    el.setAttribute('style', rewriteCss(el.getAttribute('style'), base));
+  });
+
+  doc.querySelectorAll('style').forEach(function(el){
+    el.textContent = rewriteCss(el.textContent, base);
+  });
+
+  doc.querySelectorAll('a[href]').forEach(function(el){
+    var href = el.getAttribute('href');
+    if(/^(javascript:|#|mailto:|tel:)/.test(href)) return;
+    var r = resolve(href, base);
+    if(r){
+      el.setAttribute('data-atlas-href', r);
+      el.setAttribute('href', 'javascript:void(0)');
+    }
+  });
+
+  doc.querySelectorAll('form').forEach(function(el){
+    var action = el.getAttribute('action') || base;
+    var r = resolve(action, base);
+    if(r){
+      el.setAttribute('data-atlas-action', r);
+      el.setAttribute('action', 'javascript:void(0)');
+    }
+  });
+
+  var s = doc.createElement('script');
+  s.textContent = NAV_SCRIPT;
+  (doc.head || doc.body || doc.documentElement).appendChild(s);
+
+  return doc;
+}
+
+var history = [];
+var current = null;
+var frame = document.getElementById('frame');
+var urlBar = document.getElementById('url-bar');
+var loading = document.getElementById('loading');
+
+function setLoading(on) {
+  loading.className = on ? 'active' : '';
+}
+
+function showError(status, title, msg) {
+  var html = '<html><body><div class="error-box"><div class="inner">' +
+    '<div class="code">' + status + '</div>' +
+    '<div class="title">' + title + '</div>' +
+    '<div class="msg">' + msg + '</div>' +
+    '</div></div></body></html>';
+  var blob = new Blob([html], {type:'text/html'});
+  frame.src = URL.createObjectURL(blob);
+  setLoading(false);
+}
+
+async function navigate(url, opts) {
+  opts = opts || {};
+  setLoading(true);
+  urlBar.value = url;
+
+  try {
+    var fetchUrl = proxied(url);
+    var fetchOpts = {method: opts.method || 'GET'};
+    if(opts.body) {
+      fetchOpts.body = opts.body;
+      fetchOpts.headers = {'Content-Type':'application/x-www-form-urlencoded'};
+    }
+
+    var res = await fetch(fetchUrl, fetchOpts);
+    if(!res.ok && res.status !== 200) {
+      showError(res.status, 'Request Failed', url);
+      return;
+    }
+
+    var ct = (res.headers.get('content-type') || '').toLowerCase();
+    var finalUrl = url;
+
+    if(ct.includes('text/html') || ct === '' || !ct) {
+      var text = await res.text();
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(text, 'text/html');
+      doc = rewriteDoc(doc, finalUrl);
+      var out = '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+      var blob = new Blob([out], {type:'text/html'});
+      var prev = frame.src;
+      frame.src = URL.createObjectURL(blob);
+      if(prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+      if(current) history.push(current);
+      current = url;
+    } else {
+      window.open(proxied(url), '_blank');
+      setLoading(false);
+      return;
+    }
+  } catch(err) {
+    showError(502, 'Connection Failed', err.message);
+  }
+}
+
+frame.addEventListener('load', function(){
+  setLoading(false);
+});
+
+window.addEventListener('message', function(e){
+  if(!e.data || e.data.type !== 'atlas-nav') return;
+  navigate(e.data.url, {method: e.data.method, body: e.data.body});
+});
+
+function normalizeUrl(s) {
+  s = s.trim();
+  if(!s) return null;
+  if(/^https?:\/\//i.test(s)) {
+    try { new URL(s); return s; } catch { return null; }
+  }
+  if(/\.|^localhost(:\d+)?$/.test(s)) {
+    try { new URL('https://'+s); return 'https://'+s; } catch {}
+  }
+  return 'https://duckduckgo.com/?q=' + encodeURIComponent(s);
+}
+
+document.getElementById('search-form').addEventListener('submit', function(e){
+  e.preventDefault();
+  var val = document.getElementById('search-input').value;
+  var url = normalizeUrl(val);
+  if(!url) return;
+  document.getElementById('home').style.display = 'none';
+  document.getElementById('browser').style.display = 'flex';
+  navigate(url);
+});
+
+document.getElementById('btn-home').addEventListener('click', function(){
+  document.getElementById('browser').style.display = 'none';
+  document.getElementById('home').style.display = 'flex';
+  document.getElementById('search-input').value = '';
+  history = [];
+  current = null;
+  frame.src = 'about:blank';
+});
+
+document.getElementById('btn-back').addEventListener('click', function(){
+  if(history.length) navigate(history.pop());
+});
+
+document.getElementById('btn-go').addEventListener('click', function(){
+  var url = normalizeUrl(urlBar.value);
+  if(url) navigate(url);
+});
+
+document.getElementById('url-bar').addEventListener('keydown', function(e){
+  if(e.key === 'Enter') {
+    var url = normalizeUrl(urlBar.value);
+    if(url) navigate(url);
+  }
+});
+
+})();
+</script>
+</body>
+</html>
